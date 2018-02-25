@@ -188,8 +188,7 @@ class Downloader(object):
 
             async with sess.head(url.human_repr()) as resp:
                 if resp.status == 200:
-                    length = int(resp.headers
-                                 .get(aiohttp.hdrs.CONTENT_LENGTH))
+                    length = int(resp.headers.get(aiohttp.hdrs.CONTENT_LENGTH))
                     delay = time.monotonic() - begin
                     break
 
