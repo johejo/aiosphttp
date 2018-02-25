@@ -170,5 +170,6 @@ crashlytics-build.properties
 fabric.properties
 
 d
-debug.py
+debug*
 ubuntu-17.10.1-server*
+.idea
