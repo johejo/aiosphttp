@@ -1,11 +1,17 @@
 import asyncio
 import time
 import threading
+import warnings
 from collections import deque
 from logging import getLogger, NullHandler
 
 from yarl import URL
 import aiohttp
+
+from .exceptions import (
+    HeadStatusError, DownloaderStatusError, FileSizeError,
+    CurrentTimeAcquisitionError,
+)
 
 local_logger = getLogger(__name__)
 local_logger.addHandler(NullHandler())
@@ -22,22 +28,6 @@ def match_all(es):
     return all([e == es[0] for e in es[1:]]) if es else False
 
 
-class AioSphttpError(Exception):
-    pass
-
-
-class HeadResponseError(AioSphttpError):
-    pass
-
-
-class StatusError(AioSphttpError):
-    pass
-
-
-class InitializationError(AioSphttpError, RuntimeError):
-    pass
-
-
 class EnhancedDeque(deque):
     def __init__(self):
         super().__init__()
@@ -52,7 +42,8 @@ class Downloader(object):
     def __init__(self, urls, *, split_size=10 ** 6, loop=None,
                  initial_delay_coefficient=10, initial_delay_prediction=True,
                  dynamic_block_num_selection=True, duplicate_request=True,
-                 allow_redirects=True, threshold=20, logger=local_logger):
+                 allow_redirects=True, threshold=20, close_bad_session=True,
+                 logger=local_logger):
 
         self._urls = [URL(url) for url in urls]
         self._split_size = split_size
@@ -60,6 +51,7 @@ class Downloader(object):
         self._dbns = dynamic_block_num_selection
         self._dr = duplicate_request
         self._ar = allow_redirects
+        self._cbs = close_bad_session
         self._logger = logger
 
         if loop is None:
@@ -75,8 +67,8 @@ class Downloader(object):
         if match_all(length):
             self._length = length[0]
         else:
-            self._logger.error('File sizes are different on each host.')
-            raise InitializationError
+            self._close_all()
+            raise FileSizeError
 
         self._num_req = int(self._length // self._split_size)
         self._reminder = self._length % self._split_size
@@ -126,22 +118,23 @@ class Downloader(object):
 
     def get_logs(self):
         if not self._is_complete():
-            raise RuntimeError('Download has not completed.')
+            msg = 'Download has not completed.'
+            warnings.warn(msg)
+
         return self._recv_log, self._send_log
 
     def _get_current_time(self):
         if not self._started:
-            raise RuntimeError('Download has not stated.')
+            self._close_all()
+            raise CurrentTimeAcquisitionError
+
         return time.monotonic() - self._begin
 
     def _count_invalid_block(self):
         c = 0
-        i = self._returned
-
-        while i < len(self._buf):
-            if type(self._buf[i]) is bytes:
+        for buf in self._buf:
+            if type(buf) is bytes:
                 c += 1
-            i += 1
 
         return c
 
@@ -201,17 +194,27 @@ class Downloader(object):
                         self._urls[sess_id] = URL(url).with_path(r_url.path)
 
                 else:
-                    self._logger.error('Response status code of '
-                                       'HEAD request sent to {} was {}'
-                                       .format(url.host, resp.status))
-                    raise HeadResponseError
+                    await self._remove_session(sess_id)
+                    raise HeadStatusError(url.human_repr(), resp.status)
+
         return length, (sess_id, delay)
+
+    async def _remove_session(self, sess_id):
+        await self._close(sess_id)
+        del self._sessions[sess_id]
+        del self._urls[sess_id]
 
     def _init_request(self):
         w = [self._head(sess_id) for sess_id, _ in enumerate(self._sessions)]
         done, _ = self._loop.run_until_complete(asyncio.wait(w))
 
-        r = [d.result() for d in done]
+        r = []
+        for d in done:
+            try:
+                r.append(d.result())
+            except HeadStatusError as e:
+                warnings.warn(str(e))
+
         length = [l for l, _ in r]
         delays = [d for _, d in sorted([t for _, t in r], key=lambda x: x[0])]
 
@@ -235,20 +238,21 @@ class Downloader(object):
             d = 0
 
         block_id = self._block_id_q.pop_at_any_pos(d)
-        self._logger.debug('Send req: '
-                           'sess_id={}, block_id={}, delay={}, received={}, '
-                           'returned={}, remain={}, delays={}, dup_q={}'
+        self._dup_q[sess_id] = block_id
+        self._logger.debug('Send req: sess_id={}, block_id={}, delay={}, '
+                           'received={}, returned={}, remain={}, delays={}, '
+                           'dup_q={}'
                            .format(sess_id, block_id, d, self._received,
                                    self._returned, len(self._block_id_q),
                                    self._delays, self._dup_q))
         self._send_log.append((self._get_current_time(), block_id,
                                self._urls[sess_id].host))
-        self._dup_q[sess_id] = block_id
 
         return block_id
 
     def _check_invalid_block(self, sess_id):
         target = min(self._dup_q)
+
         if self._dr and self._delays[sess_id] == min(self._delays) \
                 and self._invalid_block_num > self._threshold \
                 and self._buf[target] is None:
@@ -269,10 +273,7 @@ class Downloader(object):
 
         async with sess.get(url.human_repr(), headers=headers) as resp:
             if resp.status != 206:
-                self._logger.warning('Response status code of '
-                                     'the range request sent to {} was {}.'
-                                     .format(url.host, resp.status))
-                raise StatusError
+                raise DownloaderStatusError
 
             return await resp.read()
 
@@ -290,35 +291,44 @@ class Downloader(object):
 
             try:
                 body = await self._request(sess_id, headers)
-                if self._buf[block_id] is None:
-                    self._buf[block_id] = body
 
             except aiohttp.ClientError:
-                self._logger.warning('"aiohttp.ClientError" occurred '
-                                     'in session between {}.'
-                                     .format(self._urls[sess_id].host))
+                msg = '"aiohttp.ClientError" occurred in ' \
+                      'session between [{}].'.format(self._urls[sess_id].host)
+                warnings.warn(msg)
                 self._block_id_q.appendleft(block_id)
                 break
 
-            except StatusError:
+            except DownloaderStatusError as e:
+                warnings.warn(str(e))
                 self._block_id_q.appendleft(block_id)
                 break
+
+            else:
+                if self._buf[block_id] is None:
+                    self._buf[block_id] = body
+                elif self._cbs:
+                    self._logger.debug('Close bad session: sess_id={}'
+                                       .format(sess_id))
+                    break
 
             self._thread_event.set()
-            self._logger.debug('Recv res: '
-                               'sess_id={}, block_id={}, received={}, '
-                               'returned={}, remain={}, '
+            self._logger.debug('Recv res: sess_id={}, block_id={}, '
+                               'received={}, returned={}, remain={}, '
                                .format(sess_id, block_id, self._received,
                                        self._returned, len(self._block_id_q)))
             self._recv_log.append((self._get_current_time(), block_id,
                                    self._urls[sess_id].host))
             self._update_delays(sess_id)
 
-    def _download(self):
-        w = [self._coro(sess_id) for sess_id, _ in enumerate(self._sessions)]
+        await self._close(sess_id)
+
+    def _close_all(self):
+        w = [self._close(sess_id) for sess_id, _ in enumerate(self._sessions)]
         self._loop.run_until_complete(asyncio.wait(w))
 
-        w = [self._close(sess_id) for sess_id, _ in enumerate(self._sessions)]
+    def _download(self):
+        w = [self._coro(sess_id) for sess_id, _ in enumerate(self._sessions)]
         self._loop.run_until_complete(asyncio.wait(w))
 
     def _is_complete(self):
