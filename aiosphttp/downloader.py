@@ -39,7 +39,7 @@ class EnhancedDeque(deque):
 
 
 class Downloader(object):
-    def __init__(self, urls, *, split_size=10 ** 6, loop=None,
+    def __init__(self, urls, *, split_size=10**6, loop=None,
                  initial_delay_coefficient=10, initial_delay_prediction=True,
                  dynamic_block_num_selection=True, duplicate_request=True,
                  allow_redirects=True, threshold=20, close_bad_session=True,
@@ -88,7 +88,6 @@ class Downloader(object):
         self._buf = [None for _ in range(self._num_req)]
         self._thread_event = threading.Event()
         self._thread_lock = threading.Lock()
-        self._async_lock = asyncio.Lock()
         self._dl_thread = threading.Thread(target=self._download)
         self._init = [True for _ in self._sessions]
         self._received = 0
