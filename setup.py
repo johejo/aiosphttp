@@ -18,10 +18,8 @@ setup(
     url='https://github.com/johejo/aiosphttp',
     py_modules=['aiosphttp'],
     keywords=['HTTP', 'http-client', 'multi-http', 'range-request', 'aiohttp'],
-    install_requires=[
-        'yarl>=1.1.1',
-        'aiohttp>=3.0.1',
-    ],
+    python_requires='>=3.5.3',
+    install_requires=read('requirements.txt').split('\n'),
     classifiers=[
         'Development Status :: 4 - Beta',
         'Environment :: Console',

@@ -55,8 +55,14 @@ class Downloader(object):
         self._logger = logger
 
         if loop is None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            try:
+                import uvloop
+            except ImportError:
+                loop = asyncio.new_event_loop()
+            else:
+                loop = uvloop.new_event_loop()
+            finally:
+                asyncio.set_event_loop(loop)
         self._loop = loop
 
         w = [self._create_session() for _ in self._urls]
@@ -193,15 +199,12 @@ class Downloader(object):
                         self._urls[sess_id] = URL(url).with_path(r_url.path)
 
                 else:
-                    await self._remove_session(sess_id)
+                    await self._close(sess_id)
+                    del self._sessions[sess_id]
+                    del self._urls[sess_id]
                     raise HeadStatusError(url.human_repr(), resp.status)
 
         return length, (sess_id, delay)
-
-    async def _remove_session(self, sess_id):
-        await self._close(sess_id)
-        del self._sessions[sess_id]
-        del self._urls[sess_id]
 
     def _init_request(self):
         w = [self._head(sess_id) for sess_id, _ in enumerate(self._sessions)]
