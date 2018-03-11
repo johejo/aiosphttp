@@ -207,7 +207,9 @@ class Downloader(object):
         return length, (sess_id, delay)
 
     def _init_request(self):
-        w = [self._head(sess_id) for sess_id, _ in enumerate(self._sessions)]
+        sess_ids = [i for i, url in enumerate(self._urls)
+                    if url not in set(self._urls[:i])]
+        w = [self._head(sess_id) for sess_id in sess_ids]
         done, _ = self._loop.run_until_complete(asyncio.wait(w))
 
         r = []
