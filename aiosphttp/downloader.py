@@ -256,8 +256,9 @@ class Downloader(object):
 
     def _check_invalid_block(self, sess_id):
         target = min(self._dup_q)
+        i = self._urls.index(self._urls[sess_id])
 
-        if self._dr and self._delays[sess_id] == min(self._delays) \
+        if self._dr and self._delays[i] == min(self._delays) \
                 and self._invalid_block_num > self._threshold \
                 and self._buf[target] is None:
             self._logger.debug('Exceed threshold: '
@@ -340,3 +341,6 @@ class Downloader(object):
             return True
         else:
             return False
+
+    def __len__(self):
+        return self._length
